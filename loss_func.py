@@ -99,37 +99,6 @@ class NormalizedFocalLoss(torch.nn.Module):
         else:
             return loss.sum()
 
-class NormalizedFocalLoss_10(torch.nn.Module):
-    # 将NFL扩大十倍罢了
-    def __init__(self, scale=1.0, gamma=2, num_classes=8, alpha=None, size_average=True):
-        super(NormalizedFocalLoss_10, self).__init__()
-        if alpha is None:
-            self.alpha = Variable(torch.ones(num_classes, 1))
-        else:
-            if isinstance(alpha, Variable):
-                self.alpha = alpha
-            else:
-                self.alpha = Variable(alpha)
-        self.gamma = gamma
-        self.size_average = size_average
-        self.num_classes = num_classes
-        self.scale = scale  # 这里的scale指的是后面在结合APL的时候用到的那个参数
-
-    def forward(self, input, target):
-        target = target.view(-1, 1)
-        logpt = F.log_softmax(input, dim=1)
-        normalizor = torch.sum(-1 * (1 - logpt.data.exp()) ** self.gamma * logpt, dim=1)
-        logpt = logpt.gather(1, target)
-        logpt = logpt.view(-1)
-        pt = torch.autograd.Variable(logpt.data.exp())
-        loss = -1 * (1-pt)**self.gamma * logpt
-        loss = self.scale * loss / normalizor
-
-        if self.size_average:
-            return 10*loss.mean()  # 看下scale有没有用
-        else:
-            return 10*loss.sum()
-
 class ReverseCrossEntropy(torch.nn.Module):
     def __init__(self, num_classes=8, scale=1.0):
         super(ReverseCrossEntropy, self).__init__()
@@ -166,3 +135,15 @@ class NFLandRCE(torch.nn.Module):
     def forward(self, pred, labels):
         return self.nfl(pred, labels) + self.rce(pred, labels)
 
+class NormalizedCrossEntropy(torch.nn.Module):
+    def __init__(self, num_classes, scale=1.0):
+        super(NormalizedCrossEntropy, self).__init__()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_classes = num_classes
+        self.scale = scale
+
+    def forward(self, pred, labels):
+        pred = F.log_softmax(pred, dim=1)
+        label_one_hot = F.one_hot(labels, self.num_classes).float().to(self.device)
+        nce = -1 * torch.sum(label_one_hot * pred, dim=1) / (- pred.sum(dim=1))
+        return self.scale * nce.mean()
