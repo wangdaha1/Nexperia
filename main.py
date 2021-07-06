@@ -14,6 +14,7 @@ from datetime import datetime
 import numpy as np
 from models import MLPMixer
 from checkpoint import save_checkpoint, takeFirst
+from models import ManifoldMixupModel
 
 
 # 这个东西得写在main函数外面
@@ -21,20 +22,20 @@ os.environ['CUDA_VISIBLE_DEVICES'] = "7"
 
 # 学一学这个传参数的登西 还不知道咋用额
 parser = argparse.ArgumentParser(description='Nexperia training')
-parser.add_argument('--recording_file', type = str,default='06-27_mixup')
-parser.add_argument('--BATCH_SIZE', type=int, default=128)
-parser.add_argument('--MAX_EPOCH', type=int, default=180)
-parser.add_argument('--warmup_LR', type=bool, default=True) # 试验的时候就不要用warmupLR了
+parser.add_argument('--recording_file', type = str,default='07-06_manifold_resnet50_0.3')
+parser.add_argument('--batch_size', type=int, default=32)
+parser.add_argument('--max_epoch', type=int, default=180)
+parser.add_argument('--warmup_lr', type=bool, default=True) # 试验的时候就不要用warmuplr了
 parser.add_argument('--milestones', type = list, default=[90,140])
-parser.add_argument('--LR', type = float, default=0.1)
-parser.add_argument('--MODEL', default='resnet34') # 现在只提供了MLPMixer和resnet34两个选项
-parser.add_argument('--mixup', default=True)
-parser.add_argument('--mixup_alpha', default=1)
+parser.add_argument('--lr', type = float, default=0.1)
+parser.add_argument('--model', default='resnet50_mmix') # MLPMixer, resnet34, resnet50, resnet34_mmix, resnet50_mmix
+parser.add_argument('--train', default = 'manifold_mixup') # vanilla, mixup, manifold_mixup
+parser.add_argument('--mixup_alpha', default=0.3) # 既可以做mixup的参数 也可以做manifold mixup的参数
 parser.add_argument('--good_label', default=4)
-# parser.add_argument('--MODEL_MLPMixer_patch_size', type=int, default=-1)
-# parser.add_argument('--MODEL_MLPMixer_channel_dim', type=int, default=32)
-# parser.add_argument('--MODEL_MLPMixer_num_blocks', type=int, default=16)
-# parser.add_argument('--MODEL_MLPMixer_fig_size', default=(224,224))
+# parser.add_argument('--model_MLPMixer_patch_size', type=int, default=-1)
+# parser.add_argument('--model_MLPMixer_channel_dim', type=int, default=32)
+# parser.add_argument('--model_MLPMixer_num_blocks', type=int, default=16)
+# parser.add_argument('--model_MLPMixer_fig_size', default=(224,224))
 parser.add_argument('--loss_func', default=nn.CrossEntropyLoss())
 # parser.add_argument('--loss_func', default=FocalLoss(num_classes=9, alpha=None, gamma=2))
 args = parser.parse_args()
@@ -78,24 +79,31 @@ def main():
 
 
     #=============== load the training data ================#
-    train_loader = get_dataloader(batch_size=args.BATCH_SIZE).trainloader()
-    valid_loader = get_dataloader(batch_size=args.BATCH_SIZE).validloader()
+    train_loader = get_dataloader(batch_size=args.batch_size).trainloader()
+    valid_loader = get_dataloader(batch_size=args.batch_size).validloader()
 
     #====================== Model ==========================#
-    assert args.MODEL in ['MLPMixer', 'resnet34']
-    if args.MODEL=='MLPMixer':
-        MODEL = MLPMixer(patch_size=args.MODEL_MLPMixer_patch_size, channel_dim=args.MODEL_MLPMixer_channel_dim, \
-                         num_blocks=args.MODEL_MLPMixer_num_blocks, fig_size=args.MODEL_MLPMixer_fig_size)
+    assert args.model in ['MLPMixer', 'resnet34', 'resnet50', 'resnet34_mmix', 'resnet50_mmix']
+    if args.model=='MLPMixer':
+        MODEL = MLPMixer(patch_size=args.model_MLPMixer_patch_size, channel_dim=args.model_MLPMixer_channel_dim, \
+                         num_blocks=args.model_MLPMixer_num_blocks, fig_size=args.model_MLPMixer_fig_size)
         num_ftrs = MODEL.out_fc.in_features
         MODEL.out_fc = nn.Linear(num_ftrs, num_classes)
 
-    elif args.MODEL =='resnet34':
+    elif args.model =='resnet34':
         MODEL = models.resnet34()
         num_ftrs = MODEL.fc.in_features
         MODEL.fc = nn.Linear(num_ftrs, num_classes)  # 只改变了最后一层的输出个数
+
+    elif args.model == 'resnet50':
+        MODEL = models.resnet50()
+        num_ftrs = MODEL.fc.in_features
+        MODEL.fc = nn.Linear(num_ftrs, num_classes)
+    elif args.model == 'resnet34_mmix':
+        MODEL = ManifoldMixupModel(models.resnet34(), num_classes=num_classes, alpha=args.mixup_alpha)
+    elif args.model == 'resnet50_mmix':
+        MODEL = ManifoldMixupModel(models.resnet50(), num_classes=num_classes, alpha=args.mixup_alpha)
     MODEL.to(device)
-
-
 
     #===================== loss function ====================#
     criterion = args.loss_func
@@ -104,8 +112,8 @@ def main():
     # criterion = NormalizedFocalLoss(num_classes=num_classes, alpha=None, gamma=2)
 
     #====================== optimizer =======================#
-    optimizer = optim.SGD(MODEL.parameters(), lr=args.LR, momentum=0.9, weight_decay=1e-4)
-    if args.warmup_LR ==True:
+    optimizer = optim.SGD(MODEL.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
+    if args.warmup_lr ==True:
         scheduler = WarmupMultiStepLR(optimizer=optimizer,
                                       milestones=args.milestones,
                                       gamma=0.1,
@@ -113,7 +121,6 @@ def main():
                                       warmup_iters=5,
                                       warmup_method="linear",
                                       last_epoch=-1)
-
 
     #====================== Train model =====================#
     loss_rec = {"train": [], "valid": []}
@@ -124,21 +131,28 @@ def main():
     best_auc_epoch_checkpoints = [[0,0,{'None':None}] for _ in range(0,3)] # choose the best three models according to auc
     last_epoch_checkpoints = [[0,{'None':None}] for _ in range(0,3)] # 保存最后三个epoch的模型
 
-    for epoch in range(0, args.MAX_EPOCH):
-        if args.mixup == False:
+    assert args.train in ['vanilla', 'mixup', 'manifold_mixup']
+    for epoch in range(0, args.max_epoch):
+        if args.train == 'vanilla':
             # DataLoader这个函数还蛮妙的 不需要在每个epoch里面都去重新定义，每跑一个epoch会自动更新成新的batches
             loss_train, acc_train, mat_train, y_true_train, y_outputs_train = \
-                ModelTrainer.train(train_loader, MODEL, criterion, optimizer, epoch, device, args.MAX_EPOCH,num_classes)
-        elif args.mixup==True:
+                ModelTrainer.train(train_loader, MODEL, criterion, optimizer, epoch, device, args.max_epoch, num_classes)
+        elif args.train =='mixup':
             loss_train, acc_train, mat_train, y_true_a_train, y_true_b_train, y_outputs_train, lams = \
-                ModelTrainer.train_mixup(train_loader, MODEL, criterion, optimizer, epoch, device, args.MAX_EPOCH,\
+                ModelTrainer.train_mixup(train_loader, MODEL, criterion, optimizer, epoch, device, args.max_epoch,\
                                    num_classes, args.mixup_alpha)
+        elif args.train == 'manifold_mixup':
+            loss_train, acc_train, mat_train,y_true_a_train, y_true_b_train, y_outputs_train, lams = \
+                ModelTrainer.train_manifold_mixup(train_loader, MODEL, criterion, optimizer, epoch, device, args.max_epoch,\
+                                   num_classes, args.mixup_alpha)
+
         loss_valid, acc_valid, mat_valid, y_true_valid, y_outputs_valid = \
             ModelTrainer.valid(valid_loader, MODEL, criterion, device, num_classes)
 
-        if args.mixup == False:
+        if args.train == 'vanilla':
             roc_auc_train, pr_auc_train, fpr_98_train = cal_auc(y_true_train, y_outputs_train, args.good_label)
-        elif args.mixup == True:
+        elif args.train == 'mixup' or 'manifold_mixup':
+            # 这个函数其实没用的  但我还没去改 先这样吧
             roc_auc_train, pr_auc_train, fpr_98_train = cal_auc_mixup(y_true_a_train, y_true_b_train, lams, y_outputs_train, args.good_label)
         roc_auc_valid, pr_auc_valid, fpr_98_valid = cal_auc(y_true_valid, y_outputs_valid, args.good_label)
 
@@ -146,11 +160,11 @@ def main():
         # 每个epoch都打印结果
         print("Epoch[{:0>3}/{:0>3}] Train Acc: {:.2%} Valid Acc:{:.2%} Train loss:{:.4f} Valid loss:{:.4f} Train fpr_98:{:.2%}\
                Valid fpr_98:{:.2%} Train AUC:{:.2%} Valid AUC:{:.2%} LR:{}".format(
-                epoch + 1, args.MAX_EPOCH, acc_train, acc_valid, loss_train, loss_valid, fpr_98_train, fpr_98_valid, roc_auc_train,
+                epoch + 1, args.max_epoch, acc_train, acc_valid, loss_train, loss_valid, fpr_98_train, fpr_98_valid, roc_auc_train,
                 roc_auc_valid, optimizer.param_groups[0]["lr"]))
 
         # 用可变学习率 Update learning rate
-        if args.warmup_LR == True:
+        if args.warmup_lr == True:
             scheduler.step()
 
         # record the results of all epochs
@@ -173,10 +187,10 @@ def main():
         np.save(os.path.join(log_dir_val, 'fpr_98_rec.npy'), fpr_98_rec["valid"])
 
         # train和valid的confusion matrix图片都储存下来
-        # verbose=epoch ==MAX_EPOCH-1指的是只有在最后一个epoch画最终的confusion matrix的时候才打印信息
+        # verbose=epoch ==max_epoch-1指的是只有在最后一个epoch画最终的confusion matrix的时候才打印信息
         # 在log日志里 先打印train再valid
-        show_confMat(mat_train, class_names, "train", log_dir, verbose=epoch == args.MAX_EPOCH - 1)
-        show_confMat(mat_valid, class_names, "valid", log_dir, verbose=epoch == args.MAX_EPOCH - 1)
+        show_confMat(mat_train, class_names, "train", log_dir, verbose=epoch == args.max_epoch - 1)
+        show_confMat(mat_valid, class_names, "valid", log_dir, verbose=epoch == args.max_epoch - 1)
 
         # train和valid的loss/acc图片储存下来
         plt_x = np.arange(1, epoch + 2)
@@ -186,21 +200,23 @@ def main():
         plot_line(plt_x, roc_auc_rec["train"], plt_x, roc_auc_rec["valid"], mode="roc_auc", out_dir=log_dir)
         plot_line(plt_x, pr_auc_rec["train"], plt_x, pr_auc_rec["valid"], mode="pr_auc", out_dir=log_dir)
         plot_line(plt_x, fpr_98_rec["train"], plt_x, fpr_98_rec["valid"], mode = "fpr_98", out_dir=log_dir)
+
         # save the models
         checkpoint = {"model_state_dict": MODEL.state_dict(),
                       "optimizer_state_dict": optimizer.state_dict(),
                       "epoch": epoch + 1,
                       "best_auc": roc_auc_valid}
         # save the best 3 models according to auc 第一个跑完一半的要求还是保留一下
-        if epoch > (args.MAX_EPOCH / 2) and best_auc_epoch_checkpoints[2][0] < roc_auc_valid:
+        if epoch > (args.max_epoch / 2) and best_auc_epoch_checkpoints[2][0] < roc_auc_valid:
+
             # best_auc里面从大到小排序 大于最后一名的auc就进入队列
             new_best_element = [roc_auc_valid, epoch+1, checkpoint]
             best_auc_epoch_checkpoints.pop() # 去掉最后一名
-            best_auc_epoch_checkpoints.append(new_best_element) # 新的加进来 这里是不能有返回值的吗
+            best_auc_epoch_checkpoints.append(new_best_element)
             # 按照auc排序
             best_auc_epoch_checkpoints.sort(key=takeFirst)
-            best_auc_epoch_checkpoints.reverse() # 这两行居然不能连起来写的吗
-            # 每次出现更新就把checkpoint_best_1st/2nd/3rd都更新一下吧  这样没跑完也能看结果了
+            best_auc_epoch_checkpoints.reverse() # 这两行居然不能连起来写
+            # 每次出现更新就把checkpoint_best_1st/2nd/3rd都更新一下这样没跑完也能看结果了
             for i in range(0, 3):
                 save_checkpoint(log_dir, best_auc_epoch_checkpoints[i][2], order=i + 1, is_best=True)
 
@@ -210,7 +226,6 @@ def main():
         last_epoch_checkpoints.insert(0, new_last_element)
         for i in range(0,3):
             save_checkpoint(log_dir, last_epoch_checkpoints[i][1], order=i+1, is_last=True)
-
 
     print(" Finished!!!! {}, best aucs: {} in :{} epochs (from best1 to best3). ".format(\
         datetime.strftime(datetime.now(), '%m-%d_%H-%M'), [i[0] for i in best_auc_epoch_checkpoints],
@@ -227,4 +242,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

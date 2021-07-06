@@ -7,7 +7,6 @@ from misc import mixup_data, mixup_criterion
 from torch.autograd import Variable
 
 
-
 # 可变学习率
 class WarmupMultiStepLR(torch.optim.lr_scheduler._LRScheduler):
     def __init__(
@@ -52,8 +51,6 @@ class WarmupMultiStepLR(torch.optim.lr_scheduler._LRScheduler):
             * self.gamma ** bisect_right(self.milestones, self.last_epoch)
             for base_lr in self.base_lrs
         ]
-
-
 
 # 训练模型的函数
 class ModelTrainer(object):
@@ -113,7 +110,7 @@ class ModelTrainer(object):
 
 
     @staticmethod
-    # static method就是在用的时候不需要将class实例化也ok 其他好像也没什么特殊的额
+    # inputs mixup
     def train_mixup(data_loader, model, loss_f, optimizer, epoch_id, gpu, max_epoch, num_classes, mixup_alpha):
         ''' 这个函数是训练单个epoch
         :param data_loader: 就是用DataLoader函数导出来的batches
@@ -173,6 +170,47 @@ class ModelTrainer(object):
         # 返回的lams是一个list 长度是训练数据的个数
         return np.mean(loss_sigma), acc_avg, conf_mat, label_append_a, label_append_b, outputs_append, lam_append
 
+    @staticmethod
+    # manifold mixup
+    def train_manifold_mixup(data_loader, model, loss_f, optimizer, epoch_id, gpu, max_epoch, num_classes, mixup_alpha):
+        model.train()
+
+        conf_mat = np.zeros((num_classes, num_classes))  # confusion matrix 每次epoch都清空
+        loss_sigma = []  # 损失函数  记录每一次epoch每一个batch的training loss
+        outputs_append = []
+        label_append_a = []
+        label_append_b = []
+        lam_append = []
+
+        for i, data in enumerate(data_loader):
+            inputs, labels = data
+            inputs, labels = inputs.cuda(gpu), labels.cuda(gpu)
+            outputs, loss = model(inputs, labels)
+            optimizer.zero_grad()
+            # optimizer.module.zero_grad()
+            loss.backward()
+            optimizer.step()
+            # 统计预测信息
+            # _, predicted = torch.max(outputs.data, 1)
+            # 统计混淆矩阵记录
+            # for j in range(len(labels)):
+            #     cate_i = labels[j].cpu().numpy()
+            #     pre_i = predicted[j].cpu().numpy()
+            #     conf_mat[cate_i, pre_i] += 1.
+            for j in range(len(labels)):
+                conf_mat[4,4]+=1
+            # 统计loss
+            loss_sigma.append(loss.item())
+            # save labels and outputs to calculate ROC_auc and PR_auc
+            # probs = F.softmax(outputs, dim=1)  # 模型本身是不带softmax的 如果是用nn.CrossEntropy会自行softmax处理之后再计算
+            # label_append.append(labels.detach())
+            # outputs_append.append(probs.detach())  # 这里放在outputs里面的是对应的概率哦
+            # average accuracy of each batch
+            # acc_avg = conf_mat.trace() / conf_mat.sum()  # accuracy_average of each batch
+            acc_avg = 0.98
+            # 因为计算出来的这些值都没有什么实际的意义 所以随便输出什么都没关系 只是为了和写的cal_auc_mixup能够配套才这么写的
+            # 真正有意义的 只有模型的参数 这个在ModelTrainer.valid()里面才用
+        return np.mean(loss_sigma), acc_avg, conf_mat, label_append_a, label_append_b, outputs_append, lam_append
 
 
     @staticmethod  # valid不需要做任何变化的

@@ -6,7 +6,7 @@ def save_checkpoint(save_dir, checkpoint, order: int, is_best=False, is_last=Fal
     '''
     save the last and best 3 models (order)
     :param save_dir:
-    :param state: the states of the current saved model
+    :param checkpoint: the states of the current saved model
     :param order: 1st/2nd/3rd
     :param is_best:
     :param is_last:
@@ -20,13 +20,12 @@ def save_checkpoint(save_dir, checkpoint, order: int, is_best=False, is_last=Fal
         print("Choose one type of this model, best or last?")
         return None
     if order>3:
-        print("You shold only preserve the best/last three models")
+        print("You should only preserve the best/last three models")
         return None
     order_str = '1st' if order==1 else '2nd' if order==2 else '3rd'
     filename = 'checkpoint_'+ ('best_' if is_best==True else 'last_') + order_str+'.pkl'
     filename = os.path.join(save_dir, filename)
     torch.save(checkpoint, filename)
-
 
 
 def takeFirst(elem):
