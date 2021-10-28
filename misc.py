@@ -76,6 +76,7 @@ def show_confMat(confusion_mat, classes, set_name, out_dir, verbose=False):
     # recall: TP/(TP+FN)
     # precision: TP/(TP+FP)
     if verbose:
+        print("Confusion matrix of "+set_name+" data")
         for i in range(cls_num):# for each class, print the recall and precision
             print('class:{:<10}, total num:{:<6}, correct num:{:<5}  Recall: {:.2%} Precision: {:.2%}'.format(
                 classes[i], np.sum(confusion_mat[i, :]), confusion_mat[i, i],
@@ -164,6 +165,7 @@ def cal_auc_mixup(y_true_train_a, y_true_train_b, lams,  y_outputs_train, good_l
     # return lams*roc_auc_a+(1-lams)*roc_auc_b, lams*pr_auc_a+(1-lams)*pr_auc_b, lams*fpr_98_a+(1-lams)*fpr_98_b
     return 0.98, 0.98, 0.05
 
+# new data augmentation
 class SharpenImage(object):
     """Sharpen the inputted images"""
     def __init__(self, p=0.9):
@@ -209,10 +211,10 @@ class AddPepperNoise(object):
         """
         if random.uniform(0, 1) < self.p:
             img_ = np.array(img).copy()
-            h, w = img_.shape
+            h, w , channels = img_.shape
             signal_pct = self.snr
             noise_pct = (1 - self.snr)
-            mask = np.random.choice((0, 1, 2), size=(h, w), p=[signal_pct, noise_pct/2., noise_pct/2.])
+            mask = np.random.choice((0, 1, 2), size=(h, w, channels), p=[signal_pct, noise_pct/2., noise_pct/2.])
             img_[mask == 1] = 255   # 盐噪声
             img_[mask == 2] = 0     # 椒噪声
             return Image.fromarray(img_.astype('uint8'))
@@ -236,4 +238,119 @@ def mixup_data(x, y, alpha, gpu):
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+# remix
+def remix_lam(label_i, label_j, kappa, lam, tau):
+    '''
+    :param nums: number of samples in different classes
+    :param label_i: orders of samples, list
+    :param label_j:
+    :param kappa:
+    :param lam:
+    :param tau:
+    :return: lam_list
+    '''
+    nums = [2, 1830, 748, 532, 39446, 3399, 7527, 166, 10383]
+    lam_list = []
+    for count in range(0, len(label_i)):
+        if nums[label_i[count]] / nums[label_j[count]] >= kappa and lam < tau:
+            lam_list.append(0)
+        elif nums[label_i[count]] / nums[label_j[count]] <= 1 / kappa and (1 - lam) < tau:
+            lam_list.append(1)
+        else:
+            lam_list.append(lam)
+    return lam_list
+
+# cutmix
+def rand_bbox(size, lam):
+    '''
+    CutMix 生成剪裁区域
+    :param size: 样本的size和
+    :param lam: 生成的随机lamda值
+    :return:
+    '''
+    # inputs.size(): torch.Size([128, 3, 224, 224])
+    W = size[2]
+    H = size[3]
+    # 1.论文里的公式2，求出B的rw,rh
+    cut_rat = np.sqrt(1. - lam)
+    cut_w = np.int(W * cut_rat)
+    cut_h = np.int(H * cut_rat)
+
+    # uniform
+    # 2.论文里的公式2，求出B的rx,ry（bbox的中心点）
+    cx = np.random.randint(W)
+    cy = np.random.randint(H)
+
+    # 限制坐标区域不超过样本大小
+    bbx1 = np.clip(cx - cut_w // 2, 0, W)
+    bby1 = np.clip(cy - cut_h // 2, 0, H)
+    bbx2 = np.clip(cx + cut_w // 2, 0, W)
+    bby2 = np.clip(cy + cut_h // 2, 0, H)
+
+    # 3.返回剪裁B区域的坐标值
+    return bbx1, bby1, bbx2, bby2
+
+def cutmix_data(x,y, alpha, gpu):
+    '''Returns cutmixed inputs, pairs of targets, and lambda
+    参考https://blog.csdn.net/weixin_38715903/article/details/103999227
+    '''
+
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).cuda(gpu)
+    y_a, y_b = y, y[index]
+    bbx1, bby1, bbx2, bby2 = rand_bbox(x.size(), lam)
+    x[:, :, bbx1:bbx2, bby1:bby2] = x[index, :, bbx1:bbx2, bby1:bby2]
+    # 根据剪裁区域坐标框的值调整lam的值
+    lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (x.size()[-1] * x.size()[-2]))
+    return x, y_a, y_b, lam
+
+# cutout
+class cutout(object):
+    """Randomly mask out one or more patches from an image.
+    Args:
+        n_holes (int): Number of patches to cut out of each image.
+        length (int): The length (in pixels) of each square patch.
+    """
+    def __init__(self,  length, img, gpu):
+        self.n_holes = np.random.randint(1,4) # 1 2 3
+        self.length = length
+        self.img = img
+        self.gpu=gpu
+
+    def cutout_img(self):
+        """
+        Args:
+            img (Tensor): Tensor image of size (Batchsize, Channel, W, H).
+        Returns:
+            Tensor: Image with n_holes of dimension length x length cut out of it.
+        """
+        w = self.img.size(2)
+        h = self.img.size(3)
+
+        mask = np.ones((w, h), np.float32)
+
+        for n in range(self.n_holes):
+            x = np.random.randint(w)
+            y = np.random.randint(h)
+
+            y1 = np.clip(y - self.length // 2, 0, h)
+            y2 = np.clip(y + self.length // 2, 0, h)
+            x1 = np.clip(x - self.length // 2, 0, w)
+            x2 = np.clip(x + self.length // 2, 0, w)
+
+            mask[x1: x2, y1: y2] = 0.
+
+        mask = torch.from_numpy(mask)
+        mask = mask.expand_as(self.img)
+        mask = mask.cuda(self.gpu)
+        img = self.img * mask
+        img  = img.cuda(self.gpu)
+
+        return img
 

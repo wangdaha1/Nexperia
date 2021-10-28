@@ -15,27 +15,22 @@ import numpy as np
 from models import MLPMixer
 from checkpoint import save_checkpoint, takeFirst
 import torch.nn.functional as F
-from models import ManifoldMixupModel
+from models import ManifoldMixupModel, PatchUpModel, Remix_ManifoldMixupModel
 
 
-
-os.environ['CUDA_VISIBLE_DEVICES'] = "7"
 
 parser = argparse.ArgumentParser(description='Nexperia testing')
-parser.add_argument('--recorded_file', type = str,default='07-06_manifold_resnet50_0.1')  # 这里输入之前记录的文件名
-parser.add_argument('--BATCH_SIZE', type=int, default=32)
-parser.add_argument('--test_data', default='Mar') # Test, Jan, Feb, Mar
-parser.add_argument('--MODEL_saved', default="checkpoint_last_1st.pkl") # saved model file
-parser.add_argument('--MODEL', default='resnet50_mmix')
-# parser.add_argument('--MODEL_MLPMixer_patch_size', type=int, default=-1)
-# parser.add_argument('--MODEL_MLPMixer_channel_dim', type=int, default=32)
-# parser.add_argument('--MODEL_MLPMixer_num_blocks', type=int, default=16)
-# parser.add_argument('--MODEL_MLPMixer_fig_size', default=(224,224))
+parser.add_argument('--cuda_visible_devices', default= '8', help='assign the gpu')
+parser.add_argument('--recorded_file', type = str,default='07-31_mixup_0.3_newaug')  # 这里输入之前记录的文件名
+parser.add_argument('--batch_size', type=int, default=32)
+parser.add_argument('--test_data', default='Jan') # Test, Jan, Feb, Mar
+parser.add_argument('--model_saved', default="_best1.pth") # saved model file
+parser.add_argument('--model', default='resnet50')
 parser.add_argument('--good_label', default=4)
 parser.add_argument('--loss_func', default=nn.CrossEntropyLoss())
 args = parser.parse_args()
 
-
+os.environ['CUDA_VISIBLE_DEVICES'] = args.cuda_visible_devices
 
 def ModelTester(data_loader, model, loss_f, device, num_classes):
     '''
@@ -91,7 +86,7 @@ if __name__ == "__main__":
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     sys.stdout = Logger(os.path.join(log_dir, 'log_test.txt'), sys.stdout)
-    print("Start testing the model "+args.MODEL_saved + ' on data '+ args.test_data)
+    print("Start testing the model "+args.model_saved + ' on data '+ args.test_data)
     start_time = datetime.now()
     start_time_str = datetime.strftime(start_time, '%m-%d_%H-%M')
     print(start_time_str)
@@ -105,41 +100,50 @@ if __name__ == "__main__":
     # batch3_valid_dir = os.path.join('/import/home/xwangfy/projects_xwangfy/data_nexperia/all','val')
     # batch3_test_dir = os.path.join('/import/home/xwangfy/projects_xwangfy/data_nexperia/all','test')
     #
-    # test_data1 = get_dataloader(batch_size=args.BATCH_SIZE).testdata(batch3_train_dir)
-    # test_data2 = get_dataloader(batch_size=args.BATCH_SIZE).testdata(batch3_valid_dir)
-    # test_data3 = get_dataloader(batch_size=args.BATCH_SIZE).testdata(batch3_test_dir)
+    # test_data1 = get_dataloader(batch_size=args.batch_size).testdata(batch3_train_dir)
+    # test_data2 = get_dataloader(batch_size=args.batch_size).testdata(batch3_valid_dir)
+    # test_data3 = get_dataloader(batch_size=args.batch_size).testdata(batch3_test_dir)
     # combined_data = torch.utils.data.ConcatDataset([test_data1, test_data2, test_data3])
-    # test_loader = torch.utils.data.DataLoader(dataset=combined_data, batch_size=args.BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    # test_loader = torch.utils.data.DataLoader(dataset=combined_data, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     assert args.test_data in ['Test', 'Jan', 'Feb', 'Mar']
     if args.test_data == 'Test':
-        test_loader = get_dataloader(batch_size=args.BATCH_SIZE).testloader()
+        test_loader = get_dataloader(batch_size=args.batch_size).testloader()
     elif args.test_data == 'Jan':
-        test_loader = get_dataloader(batch_size=args.BATCH_SIZE).testloader_Jan()
+        test_loader = get_dataloader(batch_size=args.batch_size).testloader_Jan()
     elif args.test_data == 'Feb':
-        test_loader = get_dataloader(batch_size=args.BATCH_SIZE).testloader_Feb()
+        test_loader = get_dataloader(batch_size=args.batch_size).testloader_Feb()
     elif args.test_data == 'Mar':
-        test_loader = get_dataloader(batch_size=args.BATCH_SIZE).testloader_Mar()
+        test_loader = get_dataloader(batch_size=args.batch_size).testloader_Mar()
 
-    #====================== Model ==========================#
-    checkpoint_file_loc = os.path.join(saved_dir, args.MODEL_saved)
-    assert args.MODEL in ['MLPMixer', 'resnet34', 'resnet50', 'resnet34_mmix', 'resnet50_mmix']
-    if args.MODEL == 'MLPMixer':
-        MODEL = MLPMixer(patch_size=args.MODEL_MLPMixer_patch_size, channel_dim=args.MODEL_MLPMixer_channel_dim, \
-                         num_blocks=args.MODEL_MLPMixer_num_blocks, fig_size=args.MODEL_MLPMixer_fig_size)  # 这些参数必须要吗
-        num_ftrs = MODEL.out_fc.in_features
-        MODEL.out_fc = nn.Linear(num_ftrs, num_classes)
-    elif args.MODEL == 'resnet34':
-        MODEL = models.resnet34(num_classes=num_classes)
-    elif args.MODEL=='resnet50':
-        MODEL = models.resnet50(num_classes=num_classes)
-    elif args.MODEL == 'resnet34_mmix':
-        MODEL = ManifoldMixupModel(models.resnet34(), num_classes=num_classes, alpha=0)
-    elif args.MODEL == 'resnet50_mmix':
-        MODEL = ManifoldMixupModel(models.resnet50(), num_classes=num_classes, alpha=0)
+    #====================== model ==========================#
+    checkpoint_file_loc = os.path.join(saved_dir, args.model_saved)
+    assert args.model in ['MLPMixer', 'resnet18', 'resnet34', 'resnet50', 'resnet34_mmix', 'resnet50_mmix',
+                          'resnet34_patchup', 'resnet50_patchup', 'resnet50_rmmix']
+    if args.model == 'MLPMixer':
+        model = MLPMixer(patch_size=args.model_MLPMixer_patch_size, channel_dim=args.model_MLPMixer_channel_dim, \
+                         num_blocks=args.model_MLPMixer_num_blocks, fig_size=args.model_MLPMixer_fig_size)  # 这些参数必须要吗
+        num_ftrs = model.out_fc.in_features
+        model.out_fc = nn.Linear(num_ftrs, num_classes)
+    elif args.model =='resnet18':
+        model  = models.resnet18(num_classes=num_classes)
+    elif args.model == 'resnet34':
+        model = models.resnet34(num_classes=num_classes)
+    elif args.model=='resnet50':
+        model = models.resnet50(num_classes=num_classes)
+    elif args.model == 'resnet34_mmix':
+        model = ManifoldMixupModel(models.resnet34(), num_classes=num_classes, alpha=0)
+    elif args.model == 'resnet50_mmix':
+        model = ManifoldMixupModel(models.resnet50(), num_classes=num_classes, alpha=0)  # 测试的时候是不需要mix的
+    elif args.model =='resnet34_patchup':
+        model = PatchUpModel(models.resnet34(), num_classes=num_classes, block_size=7, gamma=0, patchup_type='hard')
+    elif args.model =='resnet50_patchup':
+        model = PatchUpModel(models.resnet50(), num_classes=num_classes, block_size=7, gamma=0, patchup_type='hard')
+    elif args.model == 'resnet50_rmmix':
+        model = Remix_ManifoldMixupModel(models.resnet50(), num_classes=num_classes,alpha=0,kappa=1, tau = -1)
     checkpoint = torch.load(checkpoint_file_loc)
     state_dict = checkpoint['model_state_dict']
-    MODEL.load_state_dict(state_dict)
-    MODEL.to(device)
+    model.load_state_dict(state_dict)
+    model.to(device)
 
     #===================== loss function ====================#
     criterion = args.loss_func
@@ -150,7 +154,7 @@ if __name__ == "__main__":
     # roc_auc_rec = []
     # pr_auc_rec = []
 
-    loss_test , acc_test, mat_test, y_true_test, y_outputs_test = ModelTester(test_loader, MODEL, criterion, device, num_classes)
+    loss_test , acc_test, mat_test, y_true_test, y_outputs_test = ModelTester(test_loader, model, criterion, device, num_classes)
 
     roc_auc_test, pr_auc_test, fpr_test = cal_auc(y_true_test, y_outputs_test, args.good_label)
 
@@ -170,7 +174,7 @@ if __name__ == "__main__":
     show_confMat(mat_test, class_names, "valid", log_dir, verbose=True)
 
     print(" Finished Test!!!! {} ".format(datetime.strftime(datetime.now(), '%m-%d_%H-%M')))
-
+    print("\n")
     f = open(os.path.join(log_dir, 'log_test.txt'), 'a')
     sys.stdout = f
     sys.stderr = f

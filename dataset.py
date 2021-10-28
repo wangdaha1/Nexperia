@@ -46,6 +46,7 @@ def dataset_info(txt_labels):
             print(' '.join(row[:-1]), row[-1])
     return file_names, labels
 
+
 class textReadDataset(Dataset):
     """Face Landmarks dataset"""
 
@@ -71,6 +72,9 @@ class textReadDataset(Dataset):
             print(img_name)
             return None
         return self._image_transformer(image), int(self.labels[index] - 1)
+
+    def get_labels(self):
+        return self.labels
 
 # extract from zip files
 # if __name__ == '__main__':

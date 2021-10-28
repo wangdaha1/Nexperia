@@ -5,36 +5,38 @@ import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 import os
 from misc import SharpenImage, AddPepperNoise
+from torchsampler import ImbalancedDatasetSampler # imbalanced-dataset-sampler
 
 
 # 牛了
-# class ImageFolderWithPaths(datasets.ImageFolder):
-#     """Custom dataset that includes image file paths. Extends
-#     torchvision.datasets.ImageFolder
-#
-#     # EXAMPLE USAGE:
-#     # instantiate the dataset and dataloader
-#     data_dir = "your/data_dir/here"
-#     dataset = ImageFolderWithPaths(data_dir) # our custom dataset
-#     dataloader = torch.utils.DataLoader(dataset)
-#
-#     for inputs, labels, paths in dataloader:
-#     # use the above variables freely
-#         print(inputs, labels, paths)
-#     """
-#
-#     # override the __getitem__ method. this is the method that dataloader calls
-#     def __getitem__(self, index):
-#         # this is what ImageFolder normally returns
-#         original_tuple = super(ImageFolderWithPaths, self).__getitem__(index)
-#         # the image file path
-#         path = self.imgs[index][0]   # 这里得到的path会不会占用的字符太多了。。。
-#         # make a new tuple that includes original and the path
-#         tuple_with_path = (original_tuple + (path,))
-#         return tuple_with_path
+class ImageFolderWithPaths(datasets.ImageFolder):
+    """Custom dataset that includes image file paths. Extends
+    torchvision.datasets.ImageFolder
+
+    # EXAMPLE USAGE:
+    # instantiate the dataset and dataloader
+    data_dir = "your/data_dir/here"
+    dataset = ImageFolderWithPaths(data_dir) # our custom dataset
+    dataloader = torch.utils.DataLoader(dataset)
+
+    for inputs, labels, paths in dataloader:
+    # use the above variables freely
+        print(inputs, labels, paths)
+    """
+
+    # override the __getitem__ method. this is the method that dataloader calls
+    def __getitem__(self, index):
+        # this is what ImageFolder normally returns
+        original_tuple = super(ImageFolderWithPaths, self).__getitem__(index)
+        # the image file path
+        path = self.imgs[index][0]   # 这里得到的path会不会占用的字符太多了。。。
+        # make a new tuple that includes original and the path
+        tuple_with_path = (original_tuple + (path,))
+        return tuple_with_path
 
 
-############ Jasper added to process the empty images ###################
+########### Jasper added to process the empty images ###################
+
 def collate_fn(batch):
     """
     Jasper added to process the empty images
@@ -46,7 +48,7 @@ def collate_fn(batch):
     return torch.utils.data.dataloader.default_collate(batch)
 
 class get_dataloader:
-    def __init__(self, batch_size):
+    def __init__(self, batch_size=32, imbalanced_sampler=False):
         # self.norm_mean = [0.2203, 0.2203, 0.2203]
         # self.norm_std = [0.1407, 0.1407, 0.1407]
         # self.train_transform = transforms.Compose([
@@ -65,21 +67,6 @@ class get_dataloader:
         self.norm_mean = [0.5]
         self.norm_std = [0.5]
         self.BATCH_SIZE = batch_size
-        # self.train_transform = transforms.Compose([
-        #     transforms.Resize((224, 224)),
-        #     transforms.RandomCrop(224, padding=4, padding_mode='edge'),
-        #     SharpenImage(p=0.5),
-        #     AddPepperNoise(0.9, p=0.3),
-        #     transforms.RandomChoice([
-        #         transforms.RandomAffine(degrees=4, shear=4, translate=(0.1, 0.1), scale=(0.95, 1.05)),
-        #         transforms.RandomAffine(degrees=0),
-        #     ]),
-        #     transforms.RandomHorizontalFlip(p=0.3),
-        #     transforms.ColorJitter(brightness=0.7),
-        #     transforms.ToTensor(),
-        #     transforms.RandomErasing(p=0.3, scale=(0.02, 0.2), ratio=(0.3, 2), value=(0)),
-        #     transforms.Normalize(self.norm_mean, self.norm_std),
-        # ])
         self.train_transform = transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(224),
@@ -94,17 +81,38 @@ class get_dataloader:
             transforms.ToTensor(),
             transforms.Normalize(self.norm_mean, self.norm_std),
         ])
-        self.data_dir = '/import/home/share/from_Nexperia_April2021/Nex_trainingset'
+        # 用jasper的新的data augmentation
+        self.train_transform_new = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.RandomCrop(224, padding=4, padding_mode='edge'),
+            SharpenImage(p=0.5),
+            AddPepperNoise(0.9, p=0.3),
+            transforms.RandomChoice([
+                transforms.RandomAffine(degrees=4, shear=4, translate=(0.1, 0.1), scale=(0.95, 1.05)),
+                transforms.RandomAffine(degrees=0),
+            ]),
+            transforms.RandomHorizontalFlip(p=0.3),
+            transforms.ColorJitter(brightness=0.7),
+            transforms.ToTensor(),
+            transforms.RandomErasing(p=0.3, scale=(0.02, 0.2), ratio=(0.3, 2), value=(0)), # 已经加了random erasing了，这个和cutout的作用差不多
+            transforms.Normalize(self.norm_mean, self.norm_std),
+        ])
 
+        self.data_dir = '/import/home/share/from_Nexperia_April2021/Nex_trainingset'
+        self.imbalanced_sampler = imbalanced_sampler
 
     def trainloader(self):
         name_train, labels_train = dataset_info(os.path.join(self.data_dir, 'Nex_trainingset_train.txt'))
-        train_data = textReadDataset(self.data_dir, name_train, labels_train, self.train_transform)
+        train_data = textReadDataset(self.data_dir, name_train, labels_train, self.train_transform_new)
         # if path == True:
         #     train_data = ImageFolderWithPaths(self.data_dir, self.train_transform)
         # else:
         #     train_data = datasets.ImageFolder(self.data_dir, self.train_transform)
-        train_loader = DataLoader(dataset=train_data, batch_size=self.BATCH_SIZE, shuffle=True, num_workers=4, drop_last=True)
+        if self.imbalanced_sampler==True: # [2, 1830, 748, 532, 39446, 3399, 7527, 166, 10383]
+            # 虽然others类别的抽取概率是1/2, pass是1/4w，但是pass类的数目很多 所以每个batch抽取出来的数据的label是平衡的啦 没有问题的
+            train_loader = DataLoader(dataset=train_data, sampler=ImbalancedDatasetSampler(train_data), batch_size=self.BATCH_SIZE, num_workers=4, drop_last=True)
+        else:
+            train_loader = DataLoader(dataset=train_data, batch_size=self.BATCH_SIZE, shuffle=True, num_workers=4, drop_last=True)
         return train_loader
 
     def validloader(self):
@@ -172,8 +180,9 @@ class get_dataloader:
         # return paths_set
 
 
-
 if __name__ == '__main__':
-    loader = get_dataloader(batch_size=128).testloader_Feb()
-    loader = get_dataloader(batch_size=128).testloader_Mar()
+    from misc import cutout
+    loader = get_dataloader(batch_size=128).trainloader()
+    for i, data in enumerate(loader):
+        input, target = data
     print("Yes OK")

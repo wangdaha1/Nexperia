@@ -14,16 +14,17 @@ import numpy as np
 from models import MLPMixer
 from checkpoint import save_checkpoint, takeFirst, save_model
 from models import ManifoldMixupModel, PatchUpModel, Remix_ManifoldMixupModel
+from apex import amp
 
 # PARAMETERS 都采用小写了
 parser = argparse.ArgumentParser(description='Nexperia training')
-parser.add_argument('--cuda_visible_devices', default='8', help='assign the gpu')
+parser.add_argument('--cuda_visible_devices', default='3', help='assign the gpu')
 parser.add_argument('--recording_file', type=str, default='caogao', help='file of recording')
 parser.add_argument('--loss_func', default=nn.CrossEntropyLoss())
 # parser.add_argument('--loss_func', default=FocalLoss(num_classes=9, alpha=None, gamma=2))
 parser.add_argument('--model', default='resnet50', help='backbone of model, choose from [resnet18, resnet34, resnet50, \
         resnet34_mmix, resnet50_mmix, resnet18_patchup, resnet34_patchup, resnet50_patchup, resnet18_rmmix, resnet50_rmmix, MLPMixer]')
-parser.add_argument('--train', default='vanilla',
+parser.add_argument('--train', default='vanilla', # 这里的train都改成了apex对应的代码了
                     help='the type of training, choose from [vanilla, mixup, manifold_mixup, patchup, cutout, cutmix]')
 
 # fixed parameters, do not need to change in usual case
@@ -138,7 +139,6 @@ def main():
         MODEL = Remix_ManifoldMixupModel(models.resnet50(), num_classes=num_classes, alpha=args.mixup_alpha,
                                          kappa=args.remix_kappa, tau=args.remix_tau)
     MODEL.to(device)
-
     # ===================== loss function ====================#
     if args.weight_balance == False:
         criterion = args.loss_func
@@ -168,6 +168,9 @@ def main():
                                       warmup_iters=5,
                                       warmup_method="linear",
                                       last_epoch=-1)
+    # add apex to train
+    opt_level = 'O1'
+    MODEL, optimizer = amp.initialize(MODEL, optimizer, opt_level=opt_level)
 
     # ====================== Train model =====================#
     loss_rec = {"train": [], "valid": []}
@@ -185,11 +188,11 @@ def main():
         if args.train == 'vanilla':
             # DataLoader这个函数还蛮妙的 不需要在每个epoch里面都去重新定义，每跑一个epoch会自动更新成新的batches
             loss_train, acc_train, mat_train, y_true_train, y_outputs_train = \
-                ModelTrainer.train(train_loader, MODEL, criterion, optimizer, epoch, device, args.max_epoch,
+                ModelTrainer.train_apex(train_loader, MODEL, criterion, optimizer, epoch, device, args.max_epoch,
                                    num_classes)
         elif args.train == 'mixup':
             loss_train, acc_train, mat_train, y_true_a_train, y_true_b_train, y_outputs_train, lams = \
-                ModelTrainer.train_mixup(train_loader, MODEL, criterion, optimizer, epoch, device, args.max_epoch, \
+                ModelTrainer.train_mixup_apex(train_loader, MODEL, criterion, optimizer, epoch, device, args.max_epoch, \
                                          num_classes, args.mixup_alpha, args.mix_prob)
         elif args.train == 'cutmix':
             loss_train, acc_train, mat_train, y_true_a_train, y_true_b_train, y_outputs_train, lams = \
@@ -201,7 +204,7 @@ def main():
                                           num_classes, args.mix_prob)
         elif args.train in ['manifold_mixup', 'patchup']:
             loss_train, acc_train, mat_train, y_true_a_train, y_true_b_train, y_outputs_train, lams = \
-                ModelTrainer.train_manifold_mixup(train_loader, MODEL, criterion, optimizer, epoch, device,
+                ModelTrainer.train_manifold_mixup_apex(train_loader, MODEL, criterion, optimizer, epoch, device,
                                                   args.max_epoch, \
                                                   num_classes, args.mixup_alpha)
 
@@ -303,5 +306,4 @@ def main():
 
 
 if __name__ == '__main__':
-    print(233)
-    # main()
+    main()
